@@ -92,15 +92,15 @@ function parse_table (tok, values = {}) {
 		// Turn Entity { A } Entity { B } into
 		// Entities = [{ A }, { B }]
 		if (tok.next.value != '{') throw tok.error('Expected {');
-		values.Entities = values.Entities || {type: "List", value: []};
-		values.Entities.value.push({type: "Entity", value: parse_table(tok)});
+		values.Entities = values.Entities || {List: []};
+		values.Entities.List.push({Entity: parse_table(tok)});
 		break;
 	    case 'Entities':
 		// "Entities" only appears at root of file.
 		// I use the hack above to make all entity lists symmetrical
 		// with this definition.
 		if (tok.next.value != '{') throw tok.error('Expected {');
-		values[key] = {type: "List", value: parse_table(tok)};
+		return parse_table(tok);
 		break;
 	    case 'ExtraInfo':
 		// Literally every table but ExtraInfo contains ExtraInfo
@@ -127,15 +127,15 @@ function parse_value (tok) {
 	    array.push(parse_value(tok));
 	}
 	if (tok.next.value !== '}') throw tok.error('Expected }');
-	return {type: 'List', value: array};
+	return {List: array};
     } else {
 	// Values which can be casted
 	switch (next.type) {
 	    case 'Floating': //fallthrough
 	    case 'Integer': next.value = +next.value; break;
-	    case 'Boolean': next.value = next.value == 'true'; break;
+	    case 'Bool': next.value = next.value == 'true'; break;
 	}
-	return {type: next.type, value: next.value};
+	return {[next.type]: next.value};
     }
 }
 
