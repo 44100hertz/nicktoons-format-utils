@@ -6,10 +6,9 @@
 // There may be some benefit to porting this to rust, and skipping json
 // entirely. Either way, this is a good description of every quirk of the format.
 //
-// My format spreads ExtraInfo into the containing entity.
-// It represents everything as {type: type, value: value}, with the value
+// My format represents everything as {type: type, value: value}, with the value
 // being the closest json representation to the ingame value, and the type
-// being a key from token_def, or List, or Entity.
+// Integer, Floating, String, Ident, Symbol, Bool, List, ExtraInfo, or Entity.
 // Currently, arrays and objects are not typed in this way.
 'use strict';
 
@@ -23,9 +22,9 @@ const token_def = {
     // Only one file has an 'e' in a float, and it's e-006 when it should be 0.
     Floating: /([-0-9e\.]+)f?/y,
     // Strings have no escapes.
-    String: /"(.*?)"/y,
+    String: /"(.*)"/y,
     // Identifiers are Capitalized and may have _
-    Ident: /([A-Z][\w]+)/y,
+    Ident: /([A-Z][\w]*)/y,
     Symbol: /([={}])/y, // The only 3 symbols with meaning.
     Bool: /(true|false)/y,
     // I treat ; and , as whitespace because they do nothing.
@@ -84,37 +83,41 @@ function token_iter (file) {
 
 // Parse a table from the first entry thru the closing brace.
 // Watch me de-hardcode this format.
-function parse_table (tok, values = {}) {
+function parse_table (tok, is_exinfo) {
+    const values = {};
+    const expect = (c) => {
+	if (tok.next.value != c) throw tok.error('Expected ' + c);
+    }
     while (tok.current != undefined && tok.current.value != '}') {
 	const key = tok.next.value;
-	switch (key) {
-	    case 'Entity':
-		// Turn Entity { A } Entity { B } into
-		// Entities = [{ A }, { B }]
-		if (tok.next.value != '{') throw tok.error('Expected {');
-		values.Entities = values.Entities || {List: []};
-		values.Entities.List.push({Entity: parse_table(tok)});
-		break;
-	    case 'Entities':
-		// "Entities" only appears at root of file.
-		// I use the hack above to make all entity lists symmetrical
-		// with this definition.
-		if (tok.next.value != '{') throw tok.error('Expected {');
-		return parse_table(tok);
-		break;
-	    case 'ExtraInfo':
-		// Literally every table but ExtraInfo contains ExtraInfo
-		// My choice is just to group its keys with the others.
-		if (tok.next.value != '{') throw tok.error('Expected {');
-		parse_table(tok, values);
-		break;
-	    default:
-		// If it's one one of the above, it's always x = y.
-		if (tok.next.value != '=') throw tok.error('Expected =');
-		values[key] = parse_value(tok);
+	if (!is_exinfo && (key == 'Position' || key == 'Orientation')) {
+	    expect('=');
+	    expect('{');
+	    values[key] = [];
+	    for (let i=0; i<4; ++i) values[key].push(+tok.next.value);
+	    expect('}');
+	} else if (!is_exinfo && key == 'Type') { 
+	    expect('=');
+	    values[key] = tok.next.value;
+	} else if (key == 'Entity') {
+	    // Turn Entity { A } Entity { B } into
+	    // Entities = [{ A }, { B }]
+	    expect('{');
+	    values.Entities = values.Entities || {List: []};
+	    values.Entities.List.push({Entity: parse_table(tok)});
+	} else if (key == 'Entities') {
+	    // "Entities" only appears at root of file.
+	    expect('{');
+	    return parse_table(tok);
+	} else if (key == 'ExtraInfo') {
+	    expect('{');
+	    values[key] = parse_table(tok, true);
+	} else {
+	    expect('=');
+	    values[key] = parse_value(tok);
 	}
     }
-    tok.next;
+    expect('}');
     return values;
 }
 
