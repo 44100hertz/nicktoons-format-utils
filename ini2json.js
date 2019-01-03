@@ -22,7 +22,7 @@ const token_def = {
     // Only one file has an 'e' in a float, and it's e-006 when it should be 0.
     Floating: /([-0-9e\.]+)f?/y,
     // Strings have no escapes.
-    String: /"(.*)"/y,
+    String: /"(.*?)"/y,
     // Identifiers are Capitalized and may have _
     Ident: /([A-Z][\w]*)/y,
     Symbol: /([={}])/y, // The only 3 symbols with meaning.
@@ -74,6 +74,11 @@ function token_iter (file) {
 	get next () { return this.tokens[this.pos++]; },
 	get peek () { return this.tokens[this.pos+1]; },
 	get current () { return this.tokens[this.pos]; },
+	expect: function (...toks) {
+	    for (let t of toks) {
+		if (this.next.value != t) throw this.error('Expected ' + t);
+	    }
+	},
 	error: function (string) {
 	    const c = this.current;
 	    return c.line + ':' + c.col + ' (' + c.value + ')\n\t' + string;
@@ -81,43 +86,50 @@ function token_iter (file) {
     }
 }
 
-// Parse a table from the first entry thru the closing brace.
-// Watch me de-hardcode this format.
-function parse_table (tok, is_exinfo) {
-    const values = {};
-    const expect = (c) => {
-	if (tok.next.value != c) throw tok.error('Expected ' + c);
-    }
-    while (tok.current != undefined && tok.current.value != '}') {
+function parse_file (tok) {
+    tok.expect('Entities', '{');
+    let ret = parse_exinfo(tok);
+    return ret;
+}
+
+function parse_entity (tok) {
+    const next4floats = () => Array(4).fill().map(() => +tok.next.value);
+
+    // Every entity is formatted in this exact way.
+    // This wasn't hardcoded before, but now I just don't care.
+    tok.expect('Type', '=');
+    let Type = tok.next.value;
+    tok.expect('Position', '=', '{');
+    let Position = next4floats();
+    tok.expect('}');
+    tok.expect('Orientation', '=', '{');
+    let Orientation = next4floats();
+    tok.expect('}');
+    tok.expect('ExtraInfo', '{');
+    let ExtraInfo = parse_exinfo(tok);
+    tok.expect('}');
+    return {Type, Position, Orientation, ExtraInfo};
+}
+
+function parse_exinfo (tok) {
+    const values = [];
+    const entities = [];
+    while (tok.current.value != '}') {
 	const key = tok.next.value;
-	if (!is_exinfo && (key == 'Position' || key == 'Orientation')) {
-	    expect('=');
-	    expect('{');
-	    values[key] = [];
-	    for (let i=0; i<4; ++i) values[key].push(+tok.next.value);
-	    expect('}');
-	} else if (!is_exinfo && key == 'Type') { 
-	    expect('=');
-	    values[key] = tok.next.value;
-	} else if (key == 'Entity') {
-	    // Turn Entity { A } Entity { B } into
-	    // Entities = [{ A }, { B }]
-	    expect('{');
-	    values.Entities = values.Entities || {List: []};
-	    values.Entities.List.push({Entity: parse_table(tok)});
-	} else if (key == 'Entities') {
-	    // "Entities" only appears at root of file.
-	    expect('{');
-	    return parse_table(tok);
-	} else if (key == 'ExtraInfo') {
-	    expect('{');
-	    values[key] = parse_table(tok, true);
+	if (key == 'Entity') {
+	    tok.expect('{');
+	    entities.push(parse_entity(tok));
 	} else {
-	    expect('=');
-	    values[key] = parse_value(tok);
+	    tok.expect('=');
+	    values.push({key, ...parse_value(tok)});
 	}
     }
-    expect('}');
+    if (entities.length > 0) {
+	// NestedEntities is the placeholder key they use
+	// Not sure why the .ini doesn't reflect this
+	values.push({key: "NestedEntities", type: "EntityList", value: entities})
+    }
+    tok.expect('}');
     return values;
 }
 
@@ -129,16 +141,17 @@ function parse_value (tok) {
 	while (tok.current.value != '}') {
 	    array.push(parse_value(tok));
 	}
-	if (tok.next.value !== '}') throw tok.error('Expected }');
-	return {List: array};
+	tok.expect('}');
+	return {type: 'List', value: array};
     } else {
 	// Values which can be casted
 	switch (next.type) {
 	    case 'Floating': //fallthrough
 	    case 'Integer': next.value = +next.value; break;
 	    case 'Bool': next.value = next.value == 'true'; break;
+	    case 'Ident': next.type = 'String'; break;
 	}
-	return {[next.type]: next.value};
+	return {type: next.type, value: next.value};
     }
 }
 
@@ -146,8 +159,8 @@ function convert (filename) {
     try {
 	let file = fs.readFileSync('maps/' + filename, {encoding: 'UTF-8'});
 	const tokens = token_iter(file);
-	const data = parse_table(tokens).Entities;
-	const out = JSON.stringify(data, null, 4)
+	const data = parse_file(tokens)[0];
+	const out = JSON.stringify(data, null, 2)
 	// floating hack pt. 2
 	    .replace(/"f##([^"]+)"/g, '$1');
 	fs.writeFileSync('jsonmaps/' + filename.replace('.ini', '.json'), out, {encoding: 'UTF-8'});
