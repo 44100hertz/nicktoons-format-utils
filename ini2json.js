@@ -1,15 +1,5 @@
 // Convert proprietary nicktoons-game .ini file into .json, which can later
 // be actually used.
-//
-// TODO: json isn't the best at this! I know how to make json nice
-// for the later code to parse, but I don't know if it's the best way overall.
-// There may be some benefit to porting this to rust, and skipping json
-// entirely. Either way, this is a good description of every quirk of the format.
-//
-// My format represents everything as {type: type, value: value}, with the value
-// being the closest json representation to the ingame value, and the type
-// Integer, Floating, String, Ident, Symbol, Bool, List, ExtraInfo, or Entity.
-// Currently, arrays and objects are not typed in this way.
 'use strict';
 
 const fs = require('fs');
@@ -160,9 +150,7 @@ function convert (filename) {
 	let file = fs.readFileSync('maps/' + filename, {encoding: 'UTF-8'});
 	const tokens = token_iter(file);
 	const data = parse_file(tokens)[0];
-	const out = JSON.stringify(data, null, 2)
-	// floating hack pt. 2
-	    .replace(/"f##([^"]+)"/g, '$1');
+	const out = JSON.stringify(data, null, 2);
 	fs.writeFileSync('jsonmaps/' + filename.replace('.ini', '.json'), out, {encoding: 'UTF-8'});
     } catch (err) {
 	console.log(filename + ': ' + err);
