@@ -21,44 +21,6 @@ mod trb {
     // and is also able to call 'alloc'. I only need to process arrays of said callbacks.
     use serde_derive::{Deserialize};
 
-    pub fn dump_file(string: &str) -> Vec<u8> {
-        let json: Value = serde_json::from_str(string).unwrap();
-        let out = &mut vec![];
-        if let Value::EntityList(list) = json {
-            let head = &mut (list.len() * 20 + 8); // +8 for two bytes below
-            dump_entities(&list, head, out);
-        }
-        out.to_vec()
-    }
-
-    pub fn dump_entities(list: &Vec<Entity>, head: &mut usize, mut out: &mut Vec<u8>) {
-        // layer 1: entity headers
-        for entity in list {
-            out.append(&mut entity.dump_header(head, out.len()));
-        }
-        // Why do they put this here?
-        out.append(&mut dump_int(0));
-        out.append(&mut dump_int(list.len() as u32));
-        // layer 2: entity data, extrainfo headers
-        for entity in list {
-            out.append(&mut entity.dump(head, out.len()));
-        }
-        // layer 3: extrainfo data
-        for entity in list {
-            for info in &entity.ExtraInfo {
-                out.append(&mut info.dump(head, out.len()));
-            }
-        }
-        // layer 4: RECURSION (this doesn't work)
-//        for entity in list {
-//            if let Some(ExtraInfoEntry{value: Value::EntityList(e), ..}) =
-//                entity.ExtraInfo.last()
-//            {
-//                dump_entities(e, head, &mut out);
-//            }
-//        }
-    }
-
     #[derive(Debug, Deserialize)]
     #[serde(tag = "type", content = "value")]
     pub enum Value {
@@ -66,7 +28,6 @@ mod trb {
         Integer(i32),
         Floating(f32),
         String(String),
-//        Ident(String),
         List(Vec<Value>),
         EntityList(Vec<Entity>),
     }
@@ -86,172 +47,148 @@ mod trb {
         value: Value,
     }
 
+    pub fn dump_file(string: &str) -> Vec<u8> {
+//            let head = &mut (list.len() * 20 + 8); // +8 for two bytes below
+        let value: Value = serde_json::from_str(string).unwrap();
+        let mut object = value.root_object();
+        let mut bin = vec![];
+        let mut head = object.size(); // First layer of allocation
+        loop {
+            object.dump_layer(&mut bin, &mut head);
+            if let Some(next) = object.next_layer() {
+                object = next;
+            } else {
+                break;
+            }
+        }
+        bin
+    }
+
+//    pub fn dump_entities(list: &Vec<Entity>, head: &mut usize, mut out: &mut Vec<u8>) {
+        // layer 1: entity headers
+        //for entity in list {
+         //   out.append(&mut entity.dump_header(head, out.len()));
+        //}
+        // Why do they put this here?
+        //out.append(&mut dump_int(0));
+        //out.append(&mut dump_int(list.len() as u32));
+        // layer 2: entity data, extrainfo headers
+        //for entity in list {
+        //    out.append(&mut entity.dump(head, out.len()));
+       // }
+        // layer 3: extrainfo data
+        //for entity in list {
+         //   for info in &entity.ExtraInfo {
+          //      out.append(&mut info.dump(head, out.len()));
+           // }
+       // }
+        // layer 4: RECURSION (this doesn't work)
+//        for entity in list {
+//            if let Some(ExtraInfoEntry{value: Value::EntityList(e), ..}) =
+//                entity.ExtraInfo.last()
+//            {
+//                dump_entities(e, head, &mut out);
+//            }
+//        }
+//    }
+
+
 
     impl Entity {
-        fn dump_header(&self, head: &mut usize, binsize: usize) -> Vec<u8> {
-            // Allocation order
-            let exhead_loc = *head;
-            // Each ExtraInfo header field is a 20 byte struct
-            let exinfo_fields = self.ExtraInfo.len();
-            *head += exinfo_fields * 20;
-            let type_loc = *head;
-            // Nulled, aligned string
-            *head += self.Type.len() + 1;
-            *head = align(*head);
-            let matrix_loc = *head;
-            *head += 16*4; // Orientation matrix
-            let pos_loc = *head;
-            *head += 4*4; // Position
-
-            // Definition order
-            let mut out = vec![];
-            while binsize % 4 != 0 { out.push(0); }
-            out.append(&mut dump_int(type_loc as u32));
-            out.append(&mut dump_int(exinfo_fields as u32));
-            out.append(&mut dump_int(exhead_loc as u32));
-            out.append(&mut dump_int(matrix_loc as u32));
-            out.append(&mut dump_int(pos_loc as u32));
-            out
-        }
-        fn dump(&self, head: &mut usize, binsize: usize) -> Vec<u8> {
-            let mut out = vec![];
-            for info in &self.ExtraInfo {
-                out.append(&mut info.value.dump_exinfo_head(&info.key, head));
-            }
-            let addr = binsize + out.len();
-            out.append(&mut dump_str_aligned(&self.Type, addr, 0x10));
-            out.append(&mut quaternion_to_matrix(self.Orientation)
-                       .iter().cloned().flat_map(dump_float).collect());
-            out.append(&mut self.Position
-                       .iter().cloned().flat_map(dump_float).collect());
-            out
+        fn object(&self) -> Object {
+            Object::List(0x4, vec![
+                Object::Dword(self.ExtraInfo.len() as u32),
+                reference(Object::List(0x4,
+                            self.ExtraInfo.iter()
+                                .map(|info| info.object()).collect())),
+                reference(Object::Zstring(self.Type.clone())),
+                reference(Object::List(0x10,
+                    quaternion_to_matrix(self.Orientation)
+                        .iter().cloned().map(create_dword_float).collect()
+                )),
+                reference(Object::List(0x10, // Unknown actual align value
+                        self.Position.iter().cloned()
+                            .map(create_dword_float).collect())),
+            ])
         }
     }
 
     impl Value {
-        // Generate ExtraInfo header struct
-        fn dump_exinfo_head(&self, key: &str, head: &mut usize) -> Vec<u8> {
-            let key_pos = *head;
-            *head += key.len() + 1;
-            // All lists, even empty,
-            // cause the key string to pad with zeroes for alignment to 0x20.
+        // File root representation of object
+        // TODO: Not sure how non-entities trb's do this.
+        fn root_object(&self) -> Object {
             match self {
-                Value::List(_) | Value::EntityList(_) => *head = roundup(*head, 0x20),
-                _ => {},
+                Value::EntityList(list) => Object::List(4, vec![
+                    self.object(),
+                    Object::Dword(0),
+                    Object::Dword(list.len() as u32),
+                ]),
+                _ => panic!("Expected Entities at file root."),
             }
-            // Single byte for header.
-            let mut value = self.dump_value(head);
-            // Still wondering what other typeids are, if they ever occur.
-            let (typeid, list_len) = match self {
-                Value::Integer(_) => (0, 0),
-                Value::Floating(_) => (4, 0),
-                Value::Bool(_) => (5, 0),
-                Value::String(_) => (6, 0),
-                Value::List(l) => (7, l.len()),
-                Value::EntityList(_) => (8, 0),
-            };
-
-            let mut out = vec![];
-            out.append(&mut dump_int(key_pos as u32));
-            out.append(&mut dump_int(key.len() as u32));
-            out.append(&mut dump_int(typeid));
-            out.append(&mut dump_int(list_len as u32));
-            out.append(&mut value);
-            out
         }
-
-        fn dump_value(&self, head: &mut usize) -> Vec<u8> {
-            let out = match self {
-                Value::Integer(i) => dump_int(*i as u32),
-                // Guess they use the first byte with bools
-                Value::Bool(b) => vec![if *b {1} else {0}, 0, 0, 0],
-                Value::Floating(i) => dump_float(*i),
-                Value::String(_) | Value::List(_) |
-                    Value::EntityList(_) => dump_int(*head as u32),
-            };
-            let alloc_size = match self {
-                Value::Integer(_) | Value::Floating(_) | Value::Bool(_) => 0,
-                Value::String(s) => s.len() + 1,
-                Value::List(l) => l.len() * 4,
-                // EntityList creates a 2-number "EntityList head" later on.
-                // With a pointer to the first entity, then the number of ents.
-                // That's why it doesn't have a header length.
+        // Value representation of object
+        fn object(&self) -> Object {
+            match self {
+                &Value::Integer(i) => Object::Dword(i as u32),
+                &Value::Floating(f) => create_dword_float(f),
+                &Value::Bool(b) => Object::Dword(if b {0x0100_0000} else {0}),
+                Value::String(s) => Object::Zstring(s.clone()),
+                Value::List(list) => Object::List(0x20, list.iter()
+                        .map(|it| it.object()).collect()),
+                Value::EntityList(list) => Object::List(4,
+                    list.iter().map(|it| it.object()).collect()
+                ),
+            }
+        }
+        fn exinfo_typeid(&self) -> u32 {
+            match self {
+                Value::Integer(_) =>    0,
+                Value::Floating(_) =>   4,
+                Value::Bool(_) =>       5,
+                Value::String(_) =>     6,
+                Value::List(_) =>       7,
                 Value::EntityList(_) => 8,
-            };
-            *head += alloc_size;
-            out
+            }
         }
-
-        fn dump_exinfo_body(&self, head: &mut usize) -> Vec<u8> {
-            let out = match self {
-                Value::Integer(_) | Value::Floating(_) | Value::Bool(_) => vec![],
-                Value::String(s) => dump_str_null(s),
-                Value::List(list) => {
-                    list.iter().flat_map(|e| e.dump_value(head)).collect()
-                }
-                Value::EntityList(l) => {
-                    *head = roundup(*head, 0x4);
-                    let mut ptr = dump_int(*head as u32);
-                    ptr.append(&mut dump_int(l.len() as u32));
-                    ptr
-                }
+        fn exinfo_object(&self) -> Object {
+            let obj = match self {
+                // Size of this list is in inside ExtraInfo header
+                // IDK how it knows the type of list entry. Hardcoded by key?
+                Value::List(list) => reference(Object::List(0x20, list.iter()
+                        .map(|it| it.exinfo_object()).collect())),
+                // Size of THIS list is right here
+                Value::EntityList(list) => reference(
+                        Object::List(0x4, vec![
+                            // why did they align this like this
+                            Object::List(0x10,
+                                vec![reference(self.object())],
+                            ),
+                            Object::Dword(list.len() as u32),
+                        ])
+                    ),
+                Value::String(_) => reference(self.object()),
+                _ => self.object(),
             };
-            let alloc_size = match self {
-                Value::EntityList(l) => l.len() * 20,
+            obj
+        }
+        fn exinfo_list_len(&self) -> usize {
+            match self {
+                Value::List(l) => l.len(),
                 _ => 0,
-            };
-            *head += alloc_size;
-            out
+            }
         }
     }
 
     impl ExtraInfoEntry {
-        fn dump(&self, head: &mut usize, binsize: usize) -> Vec<u8> {
-            let mut out = match self.value {
-                Value::List(_) | Value::EntityList(_) =>
-                    dump_str_aligned(&self.key, binsize, 0x20),
-                _ => dump_str_null(&self.key),
-            };
-            out.append(&mut self.value.dump_exinfo_body(head));
-            out
+        fn object(&self) -> Object {
+            Object::List(0x4, vec![ // Alignment unknown
+                reference(Object::Zstring(self.key.clone())),
+                Object::Dword(self.key.len() as u32),
+                Object::Dword(self.value.exinfo_typeid()),
+                Object::Dword(self.value.exinfo_list_len() as u32),
+                self.value.exinfo_object(),
+            ])
         }
-    }
-
-    fn roundup(num: usize, target: usize) -> usize {
-        let rem = num % target;
-        if rem == 0 { num } else { num + target - rem }
-    }
-    // They align to 16 bytes rather than 4 for most strings.
-    // For lists, 32 bytes.
-    // My theory is that the smallest bits store metadata, i.e.
-    // void* real_addr = list_ptr & 0xffff_fff0;
-    // enum Type type = list_ptr & 0xf;
-    fn align(head: usize) -> usize { roundup(head, 0x10) }
-
-    fn dump_int(int: u32) -> Vec<u8> {
-        (0..4).map(|i| (int >> (24 - i*8)) as u8).collect()
-    }
-
-    fn dump_float(float: f32) -> Vec<u8> {
-        unsafe {
-            dump_int(std::mem::transmute(float))
-        }
-    }
-
-    fn dump_str_null(s: &str) -> Vec<u8> {
-        let mut bytes: Vec<_> = s.bytes().collect();
-        bytes.push(0);
-        bytes
-    }
-
-    fn dump_str_aligned(s: &str, mut head: usize, target: usize) -> Vec<u8> {
-        let mut bytes = dump_str_null(s);
-        head += bytes.len();
-        while head % target != 0 {
-            bytes.push(0);
-            head += 1;
-        }
-        bytes
     }
 
     // This calculation still fails to reproduce the rounding errors
@@ -265,4 +202,79 @@ mod trb {
             0.0, 0.0, 0.0, 1.0
         ]
     }
+
+    // Allocation Object
+    // Doesn't care about much but memory layout!
+    #[derive(Debug)]
+    pub enum Object {
+        Dword(u32),
+        Reference(Box<Object>),
+        List(usize, Vec<Object>), // usize for alignment
+        Zstring(String),
+    }
+
+    fn create_dword_float(float: f32) -> Object {
+        unsafe {
+            Object::Dword(std::mem::transmute(float))
+        }
+    }
+    fn reference(obj: Object) -> Object {
+        Object::Reference(Box::new(obj))
+    }
+
+    fn dump_int(int: u32) -> Vec<u8> {
+        (0..4).map(|i| (int >> (24 - i*8)) as u8).collect()
+    }
+    impl Object {
+        fn dump_layer(&self, bin: &mut Vec<u8>, head: &mut usize) {
+            bin.resize(self.align(bin.len()), 0);
+            match self {
+                Object::Reference(obj) => {
+                    *head = obj.align(*head);
+                    bin.extend(dump_int(*head as u32));
+                    *head += obj.size();
+                }
+                Object::Dword(i) => bin.extend(dump_int(*i)),
+                Object::List(_,list) => for l in list { l.dump_layer(bin, head) },
+                Object::Zstring(s) => {
+                    bin.extend(s.bytes());
+                    bin.push(0);
+                }
+            }
+        }
+        fn next_layer(self) -> Option<Object> {
+            match self {
+                Object::Reference(obj) => Some(*obj),
+                Object::List(_,list) => {
+                    if list.len() > 0 {
+                        Some(Object::List(1,
+                                list.into_iter().filter_map(|item| item.next_layer()).collect()))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        fn align(&self, num: usize) -> usize {
+            let align = self.alignment();
+            let rem = num % align;
+            if rem == 0 { num } else { num + align - rem }
+        }
+        fn alignment(&self) -> usize {
+            match self {
+                Object::Reference(_) | Object::Dword(_) => 4,
+                &Object::List(align,_) => align,
+                Object::Zstring(_) => 1,
+            }
+        }
+        fn size(&self) -> usize {
+            match self {
+                Object::Reference(_) | Object::Dword(_) => 4,
+                Object::List(_,list) => list.iter().fold(0, |acc, x| acc + x.size()),
+                Object::Zstring(s) => s.len() + 1,
+            }
+        }
+    }
+
 }
