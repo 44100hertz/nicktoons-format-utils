@@ -12,15 +12,15 @@ use std::{
 
 fn main() {
     let in_path = PathBuf::from("jsonmaps");
-    let mut out_path = PathBuf::from("trb_gen/out.trb");
+    let mut out_path = PathBuf::from("trb_gen/out");
     for file in fs::read_dir(in_path).unwrap().map(|f| f.unwrap()) {
         out_path.set_file_name(&file.file_name());
-        out_path.set_extension(".trb");
+        out_path.set_extension("trb");
         println!("{:?} => {:?}", &file.path(), &out_path);
         let mapstring = fs::read_to_string(file.path()).unwrap();
         let out = trb::Value::from_string(&mapstring).dump();
         let mut outfile = File::create(&out_path).unwrap();
-        outfile.write(out.as_slice());
+        outfile.write(out.as_slice()).unwrap();
     }
 }
 
@@ -43,12 +43,16 @@ mod trb {
     // Don't let ExtraInfo fool you, all entities have several specific fields.
     #[derive(Debug, Deserialize)]
     pub struct Entity {
-        Type: String,
-        Position: [f32; 4],
-        Orientation: [f32; 4], // <- converted to 4x4 matrix later
+        #[serde(rename = "Type")]
+        typename: String,
+        #[serde(rename = "Position")]
+        position: [f32; 4],
+        #[serde(rename = "Orientation")]
+        orientation: [f64; 4], // <- converted to 4x4 matrix later
         // I'd use a map, but I like to preserve ordering, and so do they.
         // I'm sure ExtraInfo is read into a map by the game.
-        ExtraInfo: Vec<ExtraInfoEntry>,
+        #[serde(rename = "ExtraInfo")]
+        extra_info: Vec<ExtraInfoEntry>,
     }
     // Json for each is {key, type, value}, but type is fed to Value
     #[derive(Debug, Deserialize)]
@@ -114,8 +118,7 @@ mod trb {
                 }
             }
         }
-        // Used only by extrainfo, at least right now.
-        fn exinfo_typeid(&self) -> u32 {
+        fn extra_info_typeid(&self) -> u32 {
             // Are there other types? 1, 2, 3, 9+ are not here
             match self {
                 Value::Integer(_) =>    0,
@@ -127,11 +130,11 @@ mod trb {
                 Value::EntityList(_) => 8,
             }
         }
-        fn exinfo_object(&self) -> Object {
+        fn extra_info_object(&self) -> Object {
             match self {
                 // Size of this list is in inside ExtraInfo header
                 Value::List(list) => Object::ptr(Object::list(0x20, list.iter()
-                        .map(|it| it.exinfo_object()).collect())),
+                        .map(|it| it.extra_info_object()).collect())),
                 // Size of THIS list is right here
                 Value::EntityList(list) => Object::ptr(
                         Object::list(0x4, vec![
@@ -144,7 +147,7 @@ mod trb {
                 _ => self.object(),
             }
         }
-        fn exinfo_list_len(&self) -> usize {
+        fn extra_info_list_len(&self) -> usize {
             match self {
                 Value::List(l) => l.len(),
                 _ => 0,
@@ -156,17 +159,17 @@ mod trb {
         // 5-dword entity header struct
         fn object(&self) -> Object {
             Object::Struct(0x4, vec![
-                (1, Object::integer(self.ExtraInfo.len() as u32)),
+                (1, Object::integer(self.extra_info.len() as u32)),
                 (2, Object::ptr(Object::list(0x4,
-                            self.ExtraInfo.iter()
+                            self.extra_info.iter()
                                 .map(|info| info.object()).collect()))),
-                (0, Object::ptr(Object::zstring(&self.Type))),
+                (0, Object::ptr(Object::zstring(&self.typename))),
                 (3, Object::ptr(Object::list(0x10,
-                    quaternion_to_matrix(self.Orientation)
+                    quaternion_to_matrix(self.orientation)
                         .iter().cloned().map(Object::float).collect()
                 ))),
                 (4, Object::ptr(Object::list(0x10, // Unknown alignment
-                        self.Position.iter().cloned()
+                        self.position.iter().cloned()
                             .map(Object::float).collect()))),
             ])
         }
@@ -174,28 +177,28 @@ mod trb {
 
     impl ExtraInfoEntry {
         // Gives 5-dword extrainfo header struct
-        // See Value::exinfo_... for details
+        // See Value::extra_info_... for details
         fn object(&self) -> Object {
             Object::list(0x4, vec![
                 Object::ptr(Object::zstring(&self.key)),
                 Object::integer(self.key.len() as u32),
-                Object::integer(self.value.exinfo_typeid()),
-                Object::integer(self.value.exinfo_list_len() as u32),
-                self.value.exinfo_object(),
+                Object::integer(self.value.extra_info_typeid()),
+                Object::integer(self.value.extra_info_list_len() as u32),
+                self.value.extra_info_object(),
             ])
         }
     }
 
-    // This calculation still fails to reproduce the rounding errors
-    // in their calculations. Their math typically makes smaller numbers.
-    fn quaternion_to_matrix(quat: [f32; 4]) -> [f32; 16] {
+    // Since I can't seem to get the same results as their math,
+    // I opted to use more accurate math. It is a bit more accurate.
+    fn quaternion_to_matrix(quat: [f64; 4]) -> Vec<f32> {
         let (x, y, z, w) = (quat[0], quat[1], quat[2], quat[3]);
         [
-            1.0 - 2.0*(y*y + z*z), 2.0*(x*y + z*w), 2.0*(x*z - y*w), 0.0,
-            2.0*(x*y - z*w), 1.0 - 2.0*(x*x + z*z), 2.0*(y*z + x*w), 0.0,
-            2.0*(x*z + y*w), 2.0*(y*z - x*w), 1.0 - 2.0*(x*x + y*y), 0.0,
+            (y*y + z*z).mul_add(-2.0, 1.0), 2.0*(x*y + z*w), 2.0*(x*z - y*w), 0.0,
+            2.0*(x*y - z*w), (x*x + z*z).mul_add(-2.0, 1.0), 2.0*(y*z + x*w), 0.0,
+            2.0*(x*z + y*w), 2.0*(y*z - x*w), (x*x + y*y).mul_add(-2.0, 1.0), 0.0,
             0.0, 0.0, 0.0, 1.0
-        ]
+        ].iter().map(|x| *x as f32).collect()
     }
 }
 
@@ -313,6 +316,9 @@ mod allocator {
 
         // Convenience functions/constructors
 
+        pub fn ptr(object: Object) -> Object {
+            Object::Reference(Box::new(object))
+        }
         // This was once a data type!
         pub fn list(align: usize, object: Vec<Object>) -> Object {
             Object::Struct(align, object.into_iter().enumerate().collect())
@@ -334,9 +340,6 @@ mod allocator {
         }
         pub fn empty() -> Object {
             Object::Bytes(1, vec![])
-        }
-        pub fn ptr(object: Object) -> Object {
-            Object::Reference(Box::new(object))
         }
     }
     pub fn dump_int(int: u32) -> Vec<u8> {
