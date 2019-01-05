@@ -26,7 +26,7 @@ fn main() {
 
 mod trb {
     use serde_derive::{Deserialize};
-    use crate::allocator::{Object, reference};
+    use crate::allocator::{Object};
 
     // Builtin types for trb format, and my json
     #[derive(Debug, Deserialize)]
@@ -68,27 +68,27 @@ mod trb {
             let body = match self {
                 Value::EntityList(list) => Object::list(4, vec![
                     self.object(),
-                    Object::Dword(0),
-                    Object::Dword(list.len() as u32),
+                    Object::integer(0),
+                    Object::integer(list.len() as u32),
                 ]),
                 _ => panic!("Expected Entities at file root."),
             };
             let body = body.dump();
             let head = Object::list(1, vec![
-                Object::Raw("TSFB".bytes().collect()),
-                reference(Object::Raw(vec![])), // filesize; empty reference to EOF
-                Object::Raw("FBRTXRDH".bytes().collect()),
+                Object::raw_string("TSFB"),
+                Object::ptr(Object::empty()), // filesize; empty reference to EOF
+                Object::raw_string("FBRTXRDH"),
                 // I do not know what these are for (yet?)
-                Object::Dword(0x18),
-                Object::Dword(0x00010001),
-                Object::Dword(0x1),
-                Object::Dword(0x0),
-                Object::Dword(body.len() as u32),
-                Object::Dword(0x0),
-                Object::Dword(0x0),
-                Object::Raw("TCES".bytes().collect()),
-                Object::Dword(body.len() as u32),
-                Object::Raw(body),
+                Object::integer(0x18),
+                Object::integer(0x00010001),
+                Object::integer(0x1),
+                Object::integer(0x0),
+                Object::integer(body.len() as u32),
+                Object::integer(0x0),
+                Object::integer(0x0),
+                Object::raw_string("TCES"),
+                Object::integer(body.len() as u32),
+                Object::Bytes(1, body),
             ]);
             head.dump()
         }
@@ -97,10 +97,10 @@ mod trb {
         fn object(&self) -> Object {
             match self {
                 // Primitive values
-                &Value::Integer(i) => Object::Dword(i as u32),
-                &Value::Floating(f) => Object::from_float(f),
-                &Value::Bool(b) => Object::Dword(if b {0x0100_0000} else {0}),
-                Value::String(s) => Object::Zstring(s.clone()),
+                &Value::Integer(i) => Object::integer(i as u32),
+                &Value::Floating(f) => Object::float(f),
+                &Value::Bool(b) => Object::integer(if b {0x0100_0000} else {0}),
+                Value::String(s) => Object::zstring(&s),
                 // Plain arrays. Idk why they're aligned so hard.
                 Value::List(list) => {
                     Object::list(0x20, list.iter()
@@ -130,17 +130,17 @@ mod trb {
         fn exinfo_object(&self) -> Object {
             match self {
                 // Size of this list is in inside ExtraInfo header
-                Value::List(list) => reference(Object::list(0x20, list.iter()
+                Value::List(list) => Object::ptr(Object::list(0x20, list.iter()
                         .map(|it| it.exinfo_object()).collect())),
                 // Size of THIS list is right here
-                Value::EntityList(list) => reference(
+                Value::EntityList(list) => Object::ptr(
                         Object::list(0x4, vec![
-                            reference(self.object()),
-                            Object::Dword(list.len() as u32),
+                            Object::ptr(self.object()),
+                            Object::integer(list.len() as u32),
                         ])
                     ),
                 // List entries are always one dword large
-                Value::String(_) => reference(self.object()),
+                Value::String(_) => Object::ptr(self.object()),
                 _ => self.object(),
             }
         }
@@ -156,18 +156,18 @@ mod trb {
         // 5-dword entity header struct
         fn object(&self) -> Object {
             Object::Struct(0x4, vec![
-                (1, Object::Dword(self.ExtraInfo.len() as u32)),
-                (2, reference(Object::list(0x4,
+                (1, Object::integer(self.ExtraInfo.len() as u32)),
+                (2, Object::ptr(Object::list(0x4,
                             self.ExtraInfo.iter()
                                 .map(|info| info.object()).collect()))),
-                (0, reference(Object::Zstring(self.Type.clone()))),
-                (3, reference(Object::list(0x10,
+                (0, Object::ptr(Object::zstring(&self.Type))),
+                (3, Object::ptr(Object::list(0x10,
                     quaternion_to_matrix(self.Orientation)
-                        .iter().cloned().map(Object::from_float).collect()
+                        .iter().cloned().map(Object::float).collect()
                 ))),
-                (4, reference(Object::list(0x10, // Unknown alignment
+                (4, Object::ptr(Object::list(0x10, // Unknown alignment
                         self.Position.iter().cloned()
-                            .map(Object::from_float).collect()))),
+                            .map(Object::float).collect()))),
             ])
         }
     }
@@ -177,10 +177,10 @@ mod trb {
         // See Value::exinfo_... for details
         fn object(&self) -> Object {
             Object::list(0x4, vec![
-                reference(Object::Zstring(self.key.clone())),
-                Object::Dword(self.key.len() as u32),
-                Object::Dword(self.value.exinfo_typeid()),
-                Object::Dword(self.value.exinfo_list_len() as u32),
+                Object::ptr(Object::zstring(&self.key)),
+                Object::integer(self.key.len() as u32),
+                Object::integer(self.value.exinfo_typeid()),
+                Object::integer(self.value.exinfo_list_len() as u32),
                 self.value.exinfo_object(),
             ])
         }
@@ -206,16 +206,13 @@ mod allocator {
     // A memory object. Each variant fills space differently.
     #[derive(Debug)]
     pub enum Object {
-        // A 4-byte object; an integer, pointer, float, or bool
-        Dword(u32),
         // A single pointer, and the object it carries
         Reference(Box<Object>),
-        // Multiple aligned values. usize for alignment.
-        // Structs are the only data type with special alignment.
+        // Multiple values. First usize alignment.
+        // First usize of vec pair is offset.
         Struct(usize, Vec<(usize, Object)>),
-        // Null-terminated string
-        Zstring(String),
-        Raw(Vec<u8>),
+        // Single value. usize is alignment.
+        Bytes(usize, Vec<u8>),
     }
 
     impl Object {
@@ -245,10 +242,6 @@ mod allocator {
 
         // Traverse the top layer of an object, and dump it to bytes.
         fn dump_layer(&self, binhead: usize, head: &mut usize) -> Vec<u8> {
-            // Big endian dword -> byte dumper
-            fn dump_int(int: u32) -> Vec<u8> {
-                (0..4).map(|i| (int >> (24 - i*8)) as u8).collect()
-            }
             // Align with zeroes
             let mut bin = vec![];
             bin.resize(self.align_amount(binhead), 0);
@@ -261,22 +254,17 @@ mod allocator {
                     // Allocate space
                     *head += obj.size();
                 }
-                Object::Dword(i) => bin.extend(dump_int(*i)),
                 Object::Struct(_,list) => {
-                    let mut chunks = vec![];
-                    chunks.resize(list.len(), vec![]);
+                    let mut fields = vec![];
+                    fields.resize(list.len(), vec![]);
                     let mut binhead = binhead + bin.len();
                     for (pos, obj) in list {
-                        chunks[*pos] = obj.dump_layer(binhead, head);
-                        binhead += chunks[*pos].len();
+                        fields[*pos] = obj.dump_layer(binhead, head);
+                        binhead += fields[*pos].len();
                     }
-                    bin.extend(chunks.iter().flatten())
+                    bin.extend(fields.iter().flatten())
                 }
-                Object::Zstring(s) => {
-                    bin.extend(s.bytes());
-                    bin.push(0);
-                }
-                Object::Raw(r) => bin.extend(r),
+                Object::Bytes(_,r) => bin.extend(r),
             }
             bin
         }
@@ -295,7 +283,7 @@ mod allocator {
                         None
                     }
                 }
-                _ => None,
+                Object::Bytes(..) => None,
             }
         }
         fn align_amount(&self, num: usize) -> usize {
@@ -309,37 +297,50 @@ mod allocator {
         }
         fn alignment(&self) -> usize {
             match self {
-                Object::Reference(_) | Object::Dword(_) => 4,
-                &Object::Struct(align,_) => align,
-                Object::Raw(_) | Object::Zstring(_) => 1,
+                Object::Reference(_) => 4,
+                &Object::Struct(align,_) | &Object::Bytes(align,_) => align,
             }
         }
         fn size(&self) -> usize {
             match self {
-                Object::Reference(_) | Object::Dword(_) => 4,
+                Object::Reference(_) => 4,
                 Object::Struct(_,list) => {
                     list.iter().fold(0, |acc, (_,x)| acc + x.size())
                 }
-                Object::Zstring(s) => s.len() + 1,
-                Object::Raw(r) => r.len(),
+                Object::Bytes(_,r) => r.len(),
             }
         }
 
-        // Convenience functions
+        // Convenience functions/constructors
+
+        // This was once a data type!
         pub fn list(align: usize, object: Vec<Object>) -> Object {
             Object::Struct(align, object.into_iter().enumerate().collect())
         }
-
-        // Normally I'd isolate this to Value, but it's such a common thing
-        pub fn from_float(float: f32) -> Object {
-            unsafe {
-                Object::Dword(std::mem::transmute(float))
-            }
+        // Big endian dword -> byte dumper
+        pub fn integer(int: u32) -> Object {
+            Object::Bytes(4, dump_int(int))
+        }
+        pub fn float(float: f32) -> Object {
+            unsafe { Object::integer(std::mem::transmute(float)) }
+        }
+        pub fn zstring(string: &str) -> Object {
+            let mut bytes: Vec<_> = string.bytes().collect();
+            bytes.push(0);
+            Object::Bytes(1, bytes)
+        }
+        pub fn raw_string(string: &str) -> Object {
+            Object::Bytes(1, string.bytes().collect())
+        }
+        pub fn empty() -> Object {
+            Object::Bytes(1, vec![])
+        }
+        pub fn ptr(object: Object) -> Object {
+            Object::Reference(Box::new(object))
         }
     }
-    // Reference auto-boxer
-    pub fn reference(object: Object) -> Object {
-        Object::Reference(Box::new(object))
+    pub fn dump_int(int: u32) -> Vec<u8> {
+        (0..4).map(|i| (int >> (24 - i*8)) as u8).collect()
     }
 }
 
