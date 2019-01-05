@@ -16,11 +16,10 @@ fn main() {
 }
 
 mod trb {
-    // Redesign idea: "Allocation objects"
-    // First, you call 'alloc' with a size, and a callback which gives that-sized data,
-    // and is also able to call 'alloc'. I only need to process arrays of said callbacks.
     use serde_derive::{Deserialize};
+    use crate::allocator::{Object, reference};
 
+    // Builtin types for trb format, and my json
     #[derive(Debug, Deserialize)]
     #[serde(tag = "type", content = "value")]
     pub enum Value {
@@ -31,15 +30,19 @@ mod trb {
         List(Vec<Value>),
         EntityList(Vec<Entity>),
     }
-
+    // All-important game entities
+    // Don't let ExtraInfo fool you, all entities have several specific fields.
     #[derive(Debug, Deserialize)]
     pub struct Entity {
-        Type: String,
-        Position: [f32; 4],
-        Orientation: [f32; 4],
+        // These 3 are strange
+        Type: String, // <- used as value
+        Position: [f32; 4], // <- used as value
+        Orientation: [f32; 4], // <- converted to 4x4 matrix, used as value
+        // I'd use a map, but I like to preserve ordering, and so do they.
+        // I'm sure ExtraInfo is read into a map by the game.
         ExtraInfo: Vec<ExtraInfoEntry>,
     }
-
+    // Json for each is {key, type, value}, but type is fed to Value
     #[derive(Debug, Deserialize)]
     pub struct ExtraInfoEntry {
         key: String,
@@ -47,70 +50,11 @@ mod trb {
         value: Value,
     }
 
+    // Dump trb from string. It's like a "main".
     pub fn dump_file(string: &str) -> Vec<u8> {
-//            let head = &mut (list.len() * 20 + 8); // +8 for two bytes below
+        // Serde does all the work to turn json into good data structures
         let value: Value = serde_json::from_str(string).unwrap();
-        let mut object = value.root_object();
-        let mut bin = vec![];
-        let mut head = object.size(); // First layer of allocation
-        loop {
-            object.dump_layer(&mut bin, &mut head);
-            if let Some(next) = object.next_layer() {
-                object = next;
-            } else {
-                break;
-            }
-        }
-        bin
-    }
-
-//    pub fn dump_entities(list: &Vec<Entity>, head: &mut usize, mut out: &mut Vec<u8>) {
-        // layer 1: entity headers
-        //for entity in list {
-         //   out.append(&mut entity.dump_header(head, out.len()));
-        //}
-        // Why do they put this here?
-        //out.append(&mut dump_int(0));
-        //out.append(&mut dump_int(list.len() as u32));
-        // layer 2: entity data, extrainfo headers
-        //for entity in list {
-        //    out.append(&mut entity.dump(head, out.len()));
-       // }
-        // layer 3: extrainfo data
-        //for entity in list {
-         //   for info in &entity.ExtraInfo {
-          //      out.append(&mut info.dump(head, out.len()));
-           // }
-       // }
-        // layer 4: RECURSION (this doesn't work)
-//        for entity in list {
-//            if let Some(ExtraInfoEntry{value: Value::EntityList(e), ..}) =
-//                entity.ExtraInfo.last()
-//            {
-//                dump_entities(e, head, &mut out);
-//            }
-//        }
-//    }
-
-
-
-    impl Entity {
-        fn object(&self) -> Object {
-            Object::List(0x4, vec![
-                Object::Dword(self.ExtraInfo.len() as u32),
-                reference(Object::List(0x4,
-                            self.ExtraInfo.iter()
-                                .map(|info| info.object()).collect())),
-                reference(Object::Zstring(self.Type.clone())),
-                reference(Object::List(0x10,
-                    quaternion_to_matrix(self.Orientation)
-                        .iter().cloned().map(create_dword_float).collect()
-                )),
-                reference(Object::List(0x10, // Unknown actual align value
-                        self.Position.iter().cloned()
-                            .map(create_dword_float).collect())),
-            ])
-        }
+        value.root_object().dump()
     }
 
     impl Value {
@@ -127,49 +71,56 @@ mod trb {
             }
         }
         // Value representation of object
+        // i.e. after whatever pointers/metadata that refer to it
         fn object(&self) -> Object {
             match self {
+                // Primitive values
                 &Value::Integer(i) => Object::Dword(i as u32),
-                &Value::Floating(f) => create_dword_float(f),
+                &Value::Floating(f) => Object::from_float(f),
                 &Value::Bool(b) => Object::Dword(if b {0x0100_0000} else {0}),
                 Value::String(s) => Object::Zstring(s.clone()),
-                Value::List(list) => Object::List(0x20, list.iter()
-                        .map(|it| it.object()).collect()),
-                Value::EntityList(list) => Object::List(4,
-                    list.iter().map(|it| it.object()).collect()
-                ),
+                // Plain arrays. Idk why they're aligned so hard.
+                Value::List(list) => {
+                    Object::List(0x20, list.iter()
+                                 .map(|it| it.object()).collect())
+                }
+                // 5-dword structs of entity metadata.
+                // The true "value" of these is under Entity::object
+                Value::EntityList(list) => {
+                    Object::List(0x4, list.iter()
+                                 .map(|ent| ent.object()).collect())
+                }
             }
         }
+        // Used only by extrainfo, at least right now.
         fn exinfo_typeid(&self) -> u32 {
+            // Are there other types? 1, 2, 3, 9+ are not here
             match self {
                 Value::Integer(_) =>    0,
                 Value::Floating(_) =>   4,
                 Value::Bool(_) =>       5,
                 Value::String(_) =>     6,
+                // I think lists are internally typed by key string
                 Value::List(_) =>       7,
                 Value::EntityList(_) => 8,
             }
         }
         fn exinfo_object(&self) -> Object {
-            let obj = match self {
+            match self {
                 // Size of this list is in inside ExtraInfo header
-                // IDK how it knows the type of list entry. Hardcoded by key?
                 Value::List(list) => reference(Object::List(0x20, list.iter()
                         .map(|it| it.exinfo_object()).collect())),
                 // Size of THIS list is right here
                 Value::EntityList(list) => reference(
                         Object::List(0x4, vec![
-                            // why did they align this like this
-                            Object::List(0x10,
-                                vec![reference(self.object())],
-                            ),
+                            reference(self.object()),
                             Object::Dword(list.len() as u32),
                         ])
                     ),
+                // List entries are always one dword large
                 Value::String(_) => reference(self.object()),
                 _ => self.object(),
-            };
-            obj
+            }
         }
         fn exinfo_list_len(&self) -> usize {
             match self {
@@ -179,9 +130,33 @@ mod trb {
         }
     }
 
-    impl ExtraInfoEntry {
+    impl Entity {
+        // 5-dword entity header struct
+        // TODO: allocation and header order are different in theirs.
+        // I want to know if this matters.
         fn object(&self) -> Object {
-            Object::List(0x4, vec![ // Alignment unknown
+            Object::List(0x4, vec![
+                reference(Object::Zstring(self.Type.clone())),
+                Object::Dword(self.ExtraInfo.len() as u32),
+                reference(Object::List(0x4,
+                            self.ExtraInfo.iter()
+                                .map(|info| info.object()).collect())),
+                reference(Object::List(0x10,
+                    quaternion_to_matrix(self.Orientation)
+                        .iter().cloned().map(Object::from_float).collect()
+                )),
+                reference(Object::List(0x10, // Unknown alignment
+                        self.Position.iter().cloned()
+                            .map(Object::from_float).collect())),
+            ])
+        }
+    }
+
+    impl ExtraInfoEntry {
+        // Gives 5-dword extrainfo header struct
+        // See Value::exinfo_... for details
+        fn object(&self) -> Object {
+            Object::List(0x4, vec![
                 reference(Object::Zstring(self.key.clone())),
                 Object::Dword(self.key.len() as u32),
                 Object::Dword(self.value.exinfo_typeid()),
@@ -202,38 +177,69 @@ mod trb {
             0.0, 0.0, 0.0, 1.0
         ]
     }
+}
 
-    // Allocation Object
-    // Doesn't care about much but memory layout!
+mod allocator {
+    // They use a breadth-first allocator,
+    // sort of like going across each layer of a tree in order.
+
+    // A memory object. Each variant fills space differently.
     #[derive(Debug)]
     pub enum Object {
+        // A 4-byte object; an integer, pointer, float, or bool
         Dword(u32),
+        // A single pointer, and the object it carries
         Reference(Box<Object>),
-        List(usize, Vec<Object>), // usize for alignment
+        // Multiple aligned values. usize for alignment.
+        // Lists are the only data type with special alignment.
+        List(usize, Vec<Object>),
+        // Null-terminated string
         Zstring(String),
     }
 
-    fn create_dword_float(float: f32) -> Object {
-        unsafe {
-            Object::Dword(std::mem::transmute(float))
-        }
-    }
-    fn reference(obj: Object) -> Object {
-        Object::Reference(Box::new(obj))
-    }
-
-    fn dump_int(int: u32) -> Vec<u8> {
-        (0..4).map(|i| (int >> (24 - i*8)) as u8).collect()
-    }
     impl Object {
+        // Allocation loop
+        pub fn dump(self) -> Vec<u8> {
+            // I have to know where I'm allocating my pointers into,
+            // at the same time as writing those pointers.
+            //
+            // The allocation head starts at the end of the "top layer"
+            // of pointers. In the next layer, the head will have reached
+            // the layer after that one, etc.
+            let mut bin = vec![];
+            let mut head = self.size();
+            let mut layer = self;
+            loop {
+                // Collect all the data for this layer
+                layer.dump_layer(&mut bin, &mut head);
+                // Move to next layer
+                if let Some(next) = layer.next_layer() {
+                    layer = next;
+                } else {
+                    break;
+                }
+            }
+            bin
+        }
+
+        // Traverse the top layer of an object, and dump it to bytes.
         fn dump_layer(&self, bin: &mut Vec<u8>, head: &mut usize) {
+            // Big endian dword -> byte dumper
+            fn dump_int(int: u32) -> Vec<u8> {
+                (0..4).map(|i| (int >> (24 - i*8)) as u8).collect()
+            }
+            // Align with zeroes
             bin.resize(self.align(bin.len()), 0);
             match self {
                 Object::Reference(obj) => {
+                    // Align head
                     *head = obj.align(*head);
+                    // Write a pointer to "where it will be"
                     bin.extend(dump_int(*head as u32));
+                    // Allocate space
                     *head += obj.size();
                 }
+                // Literal values are just written.
                 Object::Dword(i) => bin.extend(dump_int(*i)),
                 Object::List(_,list) => for l in list { l.dump_layer(bin, head) },
                 Object::Zstring(s) => {
@@ -242,13 +248,17 @@ mod trb {
                 }
             }
         }
+
+        // Cut off the top layer, making the second layer the new top.
+        // This is done by following references.
         fn next_layer(self) -> Option<Object> {
             match self {
-                Object::Reference(obj) => Some(*obj),
+                Object::Reference(obj) => Some(*obj), // unboxes value
                 Object::List(_,list) => {
-                    if list.len() > 0 {
-                        Some(Object::List(1,
-                                list.into_iter().filter_map(|item| item.next_layer()).collect()))
+                    let next: Vec<_> = list.into_iter()
+                        .filter_map(|obj| obj.next_layer()).collect();
+                    if next.len() > 0 {
+                        Some(Object::List(1, next))
                     } else {
                         None
                     }
@@ -256,6 +266,7 @@ mod trb {
                 _ => None,
             }
         }
+        // Round up a number to this object's alignment value
         fn align(&self, num: usize) -> usize {
             let align = self.alignment();
             let rem = num % align;
@@ -275,6 +286,19 @@ mod trb {
                 Object::Zstring(s) => s.len() + 1,
             }
         }
-    }
 
+        // Convenience functions
+
+        // Normally I'd isolate this to Value, but it's such a common thing
+        pub fn from_float(float: f32) -> Object {
+            unsafe {
+                Object::Dword(std::mem::transmute(float))
+            }
+        }
+    }
+    // Reference auto-boxer
+    pub fn reference(object: Object) -> Object {
+        Object::Reference(Box::new(object))
+    }
 }
+
