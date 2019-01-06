@@ -3,6 +3,8 @@
 'use strict';
 
 const fs = require('fs');
+const indir = 'maps/';
+const outdir = 'jsonmaps/';
 
 // Every posssible valid token. I'm only a bit lazy here.
 const token_def = {
@@ -147,17 +149,18 @@ function parse_value (tok) {
 
 function convert (filename) {
     try {
-	let file = fs.readFileSync('maps/' + filename, {encoding: 'UTF-8'});
+	let file = fs.readFileSync(indir + filename, {encoding: 'UTF-8'});
 	const tokens = token_iter(file);
 	const data = parse_file(tokens)[0];
 	const out = JSON.stringify(data, null, 2);
-	fs.writeFileSync('jsonmaps/' + filename.replace('.ini', '.json'), out, {encoding: 'UTF-8'});
+	fs.writeFileSync(outdir + filename.replace('.ini', '.json'), out, {encoding: 'UTF-8'});
     } catch (err) {
 	console.log(filename + ': ' + err);
 	throw err;
     }
 };
 
+if (!fs.existsSync(outdir)) fs.mkdirSync(outdir);
 fs.readdir('maps/', (err, files) => {
     if (err) throw 'Maps folder not found!';
     for (let filename of files) convert(filename);
